@@ -1,0 +1,291 @@
+import React, { useState, useEffect, useCallback } from 'react';
+
+// Helper function for exponential backoff
+const fetchWithBackoff = async (url, options, retries = 5, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                if (response.status === 429) { // Too Many Requests
+                    console.warn(`Rate limit hit. Retrying in ${delay / 1000}s...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2; // Exponential backoff
+                    continue;
+                }
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error(`Fetch error: ${error.message}`);
+            if (i < retries - 1) {
+                console.warn(`Retrying in ${delay / 1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2;
+            } else {
+                throw error; // Re-throw if max retries reached
+            }
+        }
+    }
+};
+
+const App = () => {
+    const [portfolio, setPortfolio] = useState(() => {
+        // Load portfolio from localStorage on initial render
+        const savedPortfolio = localStorage.getItem('cryptoPortfolio');
+        return savedPortfolio ? JSON.parse(savedPortfolio) : [
+            { id: 'bitcoin', quantity: 0.05 },
+            { id: 'ethereum', quantity: 0.5 },
+            { id: 'solana', quantity: 10 },
+        ];
+    });
+    const [prices, setPrices] = useState({});
+    const [allCoins, setAllCoins] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [newCoinId, setNewCoinId] = useState('');
+    const [newCoinQuantity, setNewCoinQuantity] = useState('');
+    const [isAddingCoin, setIsAddingCoin] = useState(false);
+
+    // Save portfolio to localStorage whenever it changes
+    useEffect(() => {
+        localStorage.setItem('cryptoPortfolio', JSON.stringify(portfolio));
+    }, [portfolio]);
+
+    // Fetch all supported coins from CoinGecko
+    useEffect(() => {
+        const fetchAllCoins = async () => {
+            try {
+                const coins = await fetchWithBackoff('https://api.coingecko.com/api/v3/coins/list?x_cg_demo_api_key=YOUR_API_KEY'); // Using demo key for public access
+                setAllCoins(coins);
+            } catch (err) {
+                console.error("Failed to fetch coin list:", err);
+                setError("Failed to load coin list. Please try again later.");
+            }
+        };
+        fetchAllCoins();
+    }, []);
+
+    // Fetch live prices for portfolio coins
+    const fetchPrices = useCallback(async () => {
+        if (portfolio.length === 0) {
+            setPrices({});
+            setLoading(false);
+            return;
+        }
+
+        setLoading(true);
+        setError(null);
+        const coinIds = portfolio.map(coin => coin.id).join(',');
+        const vsCurrencies = 'usd'; // Can be made dynamic if needed
+
+        try {
+            const data = await fetchWithBackoff(`https://api.coingecko.com/api/v3/simple/price?ids=${coinIds}&vs_currencies=${vsCurrencies}&include_24hr_change=true&x_cg_demo_api_key=YOUR_API_KEY`); // Using demo key
+            setPrices(data);
+        } catch (err) {
+            console.error("Failed to fetch prices:", err);
+            setError("Failed to load live prices. Please check your internet connection or try again later.");
+        } finally {
+            setLoading(false);
+        }
+    }, [portfolio]);
+
+    useEffect(() => {
+        fetchPrices(); // Initial fetch
+
+        const interval = setInterval(() => {
+            fetchPrices(); // Fetch every 60 seconds
+        }, 60000);
+
+        return () => clearInterval(interval); // Cleanup on unmount
+    }, [fetchPrices]);
+
+    const handleAddCoin = () => {
+        if (!newCoinId || !newCoinQuantity) {
+            alert('Please select a coin and enter a quantity.');
+            return;
+        }
+
+        const existingCoinIndex = portfolio.findIndex(coin => coin.id === newCoinId);
+        if (existingCoinIndex !== -1) {
+            // Update existing coin quantity
+            const updatedPortfolio = [...portfolio];
+            updatedPortfolio[existingCoinIndex].quantity += parseFloat(newCoinQuantity);
+            setPortfolio(updatedPortfolio);
+        } else {
+            // Add new coin
+            setPortfolio([...portfolio, { id: newCoinId, quantity: parseFloat(newCoinQuantity) }]);
+        }
+
+        setNewCoinId('');
+        setNewCoinQuantity('');
+        setIsAddingCoin(false);
+    };
+
+    const handleUpdateQuantity = (id, newQuantity) => {
+        if (newQuantity < 0) return; // Prevent negative quantities
+        setPortfolio(portfolio.map(coin =>
+            coin.id === id ? { ...coin, quantity: parseFloat(newQuantity) } : coin
+        ));
+    };
+
+    const handleRemoveCoin = (id) => {
+        setPortfolio(portfolio.filter(coin => coin.id !== id));
+    };
+
+    const totalPortfolioValue = portfolio.reduce((sum, coin) => {
+        const price = prices[coin.id]?.usd;
+        return sum + (price ? price * coin.quantity : 0);
+    }, 0);
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-700 text-white p-4 sm:p-8 font-inter">
+            <div className="max-w-4xl mx-auto bg-gray-800 rounded-xl shadow-2xl p-6 sm:p-10">
+                <h1 className="text-4xl sm:text-5xl font-extrabold text-center mb-8 text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-600">
+                    Crypto Portfolio Tracker
+                </h1>
+
+                {error && (
+                    <div className="bg-red-600 p-4 rounded-lg mb-6 text-center">
+                        <p className="font-semibold">{error}</p>
+                    </div>
+                )}
+
+                <div className="mb-8 text-center">
+                    <h2 className="text-2xl sm:text-3xl font-bold mb-2">
+                        Total Portfolio Value:
+                    </h2>
+                    <p className="text-4xl sm:text-5xl font-extrabold text-green-400">
+                        {loading ? 'Loading...' : `$${totalPortfolioValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                    </p>
+                </div>
+
+                <div className="mb-8">
+                    <h3 className="text-2xl font-semibold mb-4 text-purple-300">Your Holdings</h3>
+                    {portfolio.length === 0 ? (
+                        <p className="text-center text-gray-400">No coins in your portfolio. Add some below!</p>
+                    ) : (
+                        <div className="overflow-x-auto rounded-lg shadow-inner">
+                            <table className="min-w-full bg-gray-700 rounded-lg">
+                                <thead className="bg-gray-600">
+                                    <tr>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider rounded-tl-lg">Coin</th>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider">Quantity</th>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider">Current Price (USD)</th>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider">24h Change (%)</th>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider rounded-tr-lg">Value (USD)</th>
+                                        <th className="py-3 px-4 text-left text-sm font-medium text-gray-200 uppercase tracking-wider">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-600">
+                                    {portfolio.map(coin => {
+                                        const priceData = prices[coin.id];
+                                        const currentPrice = priceData?.usd;
+                                        const dailyChange = priceData?.usd_24h_change;
+                                        const value = currentPrice ? currentPrice * coin.quantity : 0;
+                                        const changeColor = dailyChange > 0 ? 'text-green-400' : dailyChange < 0 ? 'text-red-400' : 'text-gray-400';
+
+                                        return (
+                                            <tr key={coin.id} className="hover:bg-gray-750 transition-colors duration-200">
+                                                <td className="py-3 px-4 whitespace-nowrap text-gray-100 capitalize">
+                                                    {allCoins.find(c => c.id === coin.id)?.name || coin.id}
+                                                </td>
+                                                <td className="py-3 px-4 whitespace-nowrap">
+                                                    <input
+                                                        type="number"
+                                                        value={coin.quantity}
+                                                        onChange={(e) => handleUpdateQuantity(coin.id, e.target.value)}
+                                                        className="w-24 bg-gray-700 border border-gray-600 rounded-md p-1 text-center text-gray-100 focus:ring-purple-500 focus:border-purple-500"
+                                                        step="any"
+                                                    />
+                                                </td>
+                                                <td className="py-3 px-4 whitespace-nowrap text-gray-100">
+                                                    {loading ? '...' : currentPrice ? `$${currentPrice.toLocaleString()}` : 'N/A'}
+                                                </td>
+                                                <td className="py-3 px-4 whitespace-nowrap">
+                                                    {loading ? '...' : dailyChange ? (
+                                                        <span className={changeColor}>
+                                                            {dailyChange.toFixed(2)}%
+                                                        </span>
+                                                    ) : 'N/A'}
+                                                </td>
+                                                <td className="py-3 px-4 whitespace-nowrap text-gray-100">
+                                                    {loading ? '...' : `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                                </td>
+                                                <td className="py-3 px-4 whitespace-nowrap">
+                                                    <button
+                                                        onClick={() => handleRemoveCoin(coin.id)}
+                                                        className="bg-red-500 hover:bg-red-600 text-white font-bold py-1 px-3 rounded-md transition-colors duration-200 shadow-md"
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+
+                <div className="mt-8 pt-6 border-t border-gray-700">
+                    <h3 className="text-2xl font-semibold mb-4 text-purple-300">Add New Coin</h3>
+                    <div className="flex flex-col sm:flex-row gap-4">
+                        <div className="flex-1 relative">
+                            <input
+                                type="text"
+                                placeholder="Search coin by name or symbol..."
+                                value={newCoinId}
+                                onChange={(e) => setNewCoinId(e.target.value)}
+                                onFocus={() => setIsAddingCoin(true)}
+                                className="w-full bg-gray-700 border border-gray-600 rounded-md p-3 text-gray-100 focus:ring-purple-500 focus:border-purple-500"
+                            />
+                            {isAddingCoin && newCoinId && (
+                                <ul className="absolute z-10 w-full bg-gray-700 border border-gray-600 rounded-md mt-1 max-h-60 overflow-y-auto shadow-lg">
+                                    {allCoins
+                                        .filter(coin =>
+                                            coin.name.toLowerCase().includes(newCoinId.toLowerCase()) ||
+                                            coin.symbol.toLowerCase().includes(newCoinId.toLowerCase())
+                                        )
+                                        .slice(0, 10) // Limit suggestions to 10
+                                        .map(coin => (
+                                            <li
+                                                key={coin.id}
+                                                onClick={() => {
+                                                    setNewCoinId(coin.id);
+                                                    setIsAddingCoin(false);
+                                                }}
+                                                className="p-3 hover:bg-gray-600 cursor-pointer border-b border-gray-700 last:border-b-0"
+                                            >
+                                                {coin.name} ({coin.symbol.toUpperCase()})
+                                            </li>
+                                        ))}
+                                </ul>
+                            )}
+                        </div>
+                        <input
+                            type="number"
+                            placeholder="Quantity"
+                            value={newCoinQuantity}
+                            onChange={(e) => setNewCoinQuantity(e.target.value)}
+                            className="w-full sm:w-32 bg-gray-700 border border-gray-600 rounded-md p-3 text-gray-100 focus:ring-purple-500 focus:border-purple-500"
+                            step="any"
+                        />
+                        <button
+                            onClick={handleAddCoin}
+                            className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-md transition-colors duration-200 shadow-lg flex-shrink-0"
+                        >
+                            Add Coin
+                        </button>
+                    </div>
+                </div>
+
+                <p className="text-center text-gray-500 text-sm mt-10">
+                    Prices powered by CoinGecko API. Data updates every 60 seconds.
+                </p>
+            </div>
+        </div>
+    );
+};
+
+export default App;
